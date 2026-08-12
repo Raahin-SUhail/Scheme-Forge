@@ -5,6 +5,8 @@ from flask_cors import CORS
 from config import Config
 from database import db
 
+# Configure structured logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
 def create_app(config_class=Config):
@@ -21,19 +23,30 @@ def create_app(config_class=Config):
     else:
         CORS(app, resources={r"/api/*": {"origins": origins}})
 
-    # Auto-create tables and seed database if missing (Production SQLite Auto-Seeding)
+    # Step 1: Import all SQLAlchemy models BEFORE db.create_all() so metadata contains all tables
+    import models
+    from models import Scheme
+
+    # Step 2: Auto-create tables and seed database if missing (Production SQLite Auto-Seeding)
     with app.app_context():
         try:
             db.create_all()
-            from models import Scheme
-            if db.session.query(Scheme).count() == 0:
-                logger.info("Initializing and seeding empty database...")
-                from seed import seed_database
-                seed_database()
-        except Exception as e:
-            logger.warning(f"Database auto-initialization notice: {e}")
+            logger.info("Database tables initialized")
 
-    # Register Blueprints
+            scheme_count = db.session.query(Scheme).count()
+            logger.info(f"Database contains {scheme_count} schemes")
+
+            if scheme_count == 0:
+                logger.info("Database is empty. Starting seed process...")
+                from seed import seed_database
+                seed_database(app=app)
+                seeded_count = db.session.query(Scheme).count()
+                logger.info(f"Database seeded with {seeded_count} schemes")
+        except Exception as e:
+            logger.error(f"Failed to initialize SQLite database: {e}", exc_info=True)
+            raise e
+
+    # Step 3: Register Blueprints
     from routes.schemes import schemes_bp
     from routes.eligibility import eligibility_bp
     from routes.contact import contact_bp
@@ -44,7 +57,7 @@ def create_app(config_class=Config):
     app.register_blueprint(contact_bp, url_prefix='/api')
     app.register_blueprint(ai_bp, url_prefix='/api')
 
-    # Global Health Endpoint
+    # Step 4: Global Health Endpoint
     @app.route('/api/health', methods=['GET'])
     def health_check():
         ai_provider = os.getenv('AI_PROVIDER', 'fallback')
@@ -56,7 +69,7 @@ def create_app(config_class=Config):
             "aiConfigured": ai_configured
         }), 200
 
-    # Global Error Handlers
+    # Step 5: Global Error Handlers
     @app.errorhandler(400)
     def bad_request(error):
         return jsonify({"success": False, "error": "Bad Request", "message": str(error)}), 400
